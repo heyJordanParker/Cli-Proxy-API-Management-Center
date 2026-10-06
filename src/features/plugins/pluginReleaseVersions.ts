@@ -10,7 +10,11 @@ export interface PluginReleaseVersion {
   assetNames: string[];
 }
 
-const GITHUB_API_BASE = 'https://api.github.com';
+export const GITHUB_API_BASE = 'https://api.github.com';
+export const GITHUB_API_HEADERS = {
+  Accept: 'application/vnd.github+json',
+  'X-GitHub-Api-Version': '2022-11-28',
+};
 const GITHUB_HOSTS = new Set(['github.com', 'www.github.com']);
 const GITHUB_RELEASES_PAGE_SIZE = 50;
 
@@ -84,10 +88,7 @@ export const fetchPluginReleaseVersions = async (
   const result = await apiCallApi.request({
     method: 'GET',
     url: `${GITHUB_API_BASE}/repos/${slug}/releases?per_page=${GITHUB_RELEASES_PAGE_SIZE}`,
-    header: {
-      Accept: 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-    },
+    header: GITHUB_API_HEADERS,
   });
 
   if (result.statusCode < 200 || result.statusCode >= 300) {

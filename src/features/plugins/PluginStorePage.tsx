@@ -16,6 +16,7 @@ import {
   IconSearch,
   IconSettings,
   IconShield,
+  IconStar,
 } from '@/components/ui/icons';
 import { useHeaderRefresh } from '@/hooks/useHeaderRefresh';
 import { pluginStoreApi } from '@/services/api';
@@ -37,6 +38,13 @@ import {
   supportsPluginVersionSelection,
   type PluginReleaseVersion,
 } from './pluginReleaseVersions';
+import {
+  fetchPluginRepositoryStars,
+  getRepositoryStarsKey,
+  PLUGIN_STORE_SORT_MODES,
+  sortPluginStoreEntries,
+  type PluginStoreSortMode,
+} from './pluginStars';
 import { waitForPluginStoreState } from './pluginPolling';
 import styles from './PluginStorePage.module.scss';
 
@@ -78,6 +86,7 @@ const formatInstallType = (installType: string) =>
     .map((part) => (part ? `${part[0].toUpperCase()}${part.slice(1)}` : part))
     .join(' ');
 const releaseVersionsCache = new Map<string, PluginReleaseVersion[]>();
+const repositoryStarsCache = new Map<string, number | null>();
 
 const formatReleaseDate = (value: string, locale: string) => {
   if (!value) return '';
@@ -460,7 +469,7 @@ function PluginInstallOptionsModal({
 }
 
 export function PluginStorePage() {
-  const { t } = useTranslation();
+  const { i18n, t } = useTranslation();
   const navigate = useNavigate();
   const connectionStatus = useAuthStore((state) => state.connectionStatus);
   const apiBase = useAuthStore((state) => state.apiBase);
@@ -472,6 +481,8 @@ export function PluginStorePage() {
   const [error, setError] = useState<StoreLoadError | null>(null);
   const [filter, setFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState<StoreStatusFilter>('all');
+  const [sortMode, setSortMode] = useState<PluginStoreSortMode>('stars');
+  const [repositoryStars, setRepositoryStars] = useState(() => new Map(repositoryStarsCache));
   const [installingKey, setInstallingKey] = useState('');
   const [restartRequiredKeys, setRestartRequiredKeys] = useState<string[]>([]);
   const [expandedDescriptionKeys, setExpandedDescriptionKeys] = useState<string[]>([]);
@@ -531,6 +542,36 @@ export function PluginStorePage() {
     void loadStore();
   }, [loadStore]);
 
+  useEffect(() => {
+    const missing = (data?.plugins ?? [])
+      .map((plugin) => getRepositoryStarsKey(plugin.repository))
+      .filter((key) => key && !repositoryStarsCache.has(key));
+    if (missing.length === 0) return;
+
+    fetchPluginRepositoryStars(missing)
+      .then((found) => {
+        missing.forEach((key) => repositoryStarsCache.set(key, found.get(key) ?? null));
+        setRepositoryStars(new Map(repositoryStarsCache));
+      })
+      .catch((err: unknown) => {
+        console.error('Failed to load plugin GitHub stars:', err);
+      });
+  }, [data?.plugins]);
+
+  const compactNumberFormat = useMemo(
+    () => new Intl.NumberFormat(i18n.language, { notation: 'compact', maximumFractionDigits: 1 }),
+    [i18n.language]
+  );
+
+  const sortOptions = useMemo(
+    () =>
+      PLUGIN_STORE_SORT_MODES.map((mode) => ({
+        value: mode,
+        label: t(`plugin_store.sort_${mode}`),
+      })),
+    [t]
+  );
+
   const stats = useMemo(() => {
     const plugins = data?.plugins ?? [];
     const installed = plugins.filter((plugin) => plugin.installed).length;
@@ -552,9 +593,8 @@ export function PluginStorePage() {
     });
 
     const query = filter.trim().toLowerCase();
-    if (!query) return byStatus;
-
-    return byStatus.filter((plugin) => {
+    const matching = byStatus.filter((plugin) => {
+      if (!query) return true;
       const haystack = [
         plugin.id,
         plugin.name,
@@ -571,7 +611,9 @@ export function PluginStorePage() {
         .toLowerCase();
       return haystack.includes(query);
     });
-  }, [data?.plugins, filter, statusFilter]);
+
+    return sortPluginStoreEntries(matching, sortMode, repositoryStars);
+  }, [data?.plugins, filter, statusFilter, sortMode, repositoryStars]);
 
   const statusFilters: Array<{ key: StoreStatusFilter; label: string; count: number }> = [
     { key: 'all', label: t('plugin_store.filter_all'), count: stats.total },
@@ -805,7 +847,10 @@ export function PluginStorePage() {
       ? t('plugin_store.cli_proxy_api_source')
       : entry.sourceName;
     const sourceText = sourceName ? t('plugin_store.source_name', { source: sourceName }) : '';
-    const metaItems = [versionText, sourceText, entry.author, entry.license].filter(Boolean);
+    const bylineItems = [versionText, entry.author].filter(Boolean);
+    const starCount = repositoryStars.get(getRepositoryStarsKey(entry.repository));
+    const starsLabel =
+      typeof starCount === 'number' ? t('plugin_store.stars', { count: starCount }) : '';
     const isInstalling = installingKey === entryKey;
     const hasPendingInstall = Boolean(installingKey);
     const missingAuth = entry.authRequired && !entry.authConfigured;
@@ -828,6 +873,13 @@ export function PluginStorePage() {
       : '';
     const actionDisabled = !connected || missingAuth || (hasPendingInstall && !isInstalling);
     const actionTitle = missingAuth ? t('plugin_store.auth_required_hint') : undefined;
+    const details = [
+      installTypeText ? t('plugin_store.install_type', { type: installTypeText }) : '',
+      platformText,
+      sourceText,
+      entry.license,
+    ].filter(Boolean);
+    const hasChips = !isOfficial || entry.installed || entry.authRequired || entry.tags.length > 0;
 
     return (
       <article key={entryKey} className={styles.card}>
@@ -837,29 +889,25 @@ export function PluginStorePage() {
           </div>
           <div className={styles.cardTitleBlock}>
             <h2 className={styles.cardTitle}>{getStoreEntryTitle(entry)}</h2>
-            <span className={styles.cardId}>{entry.id}</span>
-          </div>
-          <div className={styles.cardBadges}>
-            {!isOfficial ? (
-              <span className={styles.badgeUntrusted}>
-                <IconAlertTriangle size={11} />
-                {t('plugin_store.badge_untrusted')}
-              </span>
-            ) : null}
-            {isUpdate ? (
-              <span className={styles.badgeWarning}>{t('plugin_store.badge_update')}</span>
-            ) : entry.installed ? (
-              <span className={styles.badgeSuccess}>{t('plugin_store.badge_installed')}</span>
-            ) : null}
-            {entry.installed && entry.effectiveEnabled ? (
-              <span className={styles.badge}>{t('plugin_store.badge_effective')}</span>
-            ) : null}
-            {entry.authRequired ? (
-              <span className={entry.authConfigured ? styles.badge : styles.badgeWarning}>
-                {authText}
-              </span>
+            {bylineItems.length > 0 ? (
+              <p className={styles.cardByline}>
+                {bylineItems.map((item) => (
+                  <span key={item}>{item}</span>
+                ))}
+              </p>
             ) : null}
           </div>
+          {typeof starCount === 'number' ? (
+            <span
+              className={styles.cardStars}
+              role="img"
+              aria-label={starsLabel}
+              title={starsLabel}
+            >
+              <IconStar size={12} />
+              {compactNumberFormat.format(starCount)}
+            </span>
+          ) : null}
         </div>
 
         {entry.description ? (
@@ -867,9 +915,8 @@ export function PluginStorePage() {
             <p
               id={descriptionID}
               ref={(node) => registerDescriptionRef(entryKey, node)}
-              className={`${styles.cardDesc} ${
-                isDescriptionExpanded ? styles.cardDescExpanded : ''
-              }`}
+              className={styles.cardDesc}
+              data-expanded={isDescriptionExpanded}
             >
               {entry.description}
             </p>
@@ -891,32 +938,50 @@ export function PluginStorePage() {
           </div>
         ) : null}
 
-        {metaItems.length > 0 || installTypeText || platformText ? (
-          <div className={styles.cardMeta}>
-            {installTypeText ? (
-              <span className={styles.metaItem}>
-                {t('plugin_store.install_type', { type: installTypeText })}
+        {hasChips ? (
+          <div className={styles.chipRow}>
+            {!isOfficial ? (
+              <span className={styles.chip} data-tone="danger">
+                <IconAlertTriangle size={12} />
+                {t('plugin_store.badge_untrusted')}
               </span>
             ) : null}
-            {platformText ? <span className={styles.metaItem}>{platformText}</span> : null}
-            {metaItems.map((item, index) => (
-              <span key={`${entryKey}-meta-${index}`} className={styles.metaItem}>
-                {index > 0 ? <span className={styles.metaDot} aria-hidden="true" /> : null}
-                {index === 0 && versionText ? <strong>{item}</strong> : item}
+            {isUpdate ? (
+              <span className={styles.chip} data-tone="warning">
+                {t('plugin_store.badge_update')}
               </span>
-            ))}
-          </div>
-        ) : null}
-
-        {entry.tags.length > 0 ? (
-          <div className={styles.tagRow}>
+            ) : entry.installed ? (
+              <span className={styles.chip} data-tone="success">
+                {t('plugin_store.badge_installed')}
+              </span>
+            ) : null}
+            {entry.installed && entry.effectiveEnabled ? (
+              <span className={styles.chip} data-tone="neutral">
+                {t('plugin_store.badge_effective')}
+              </span>
+            ) : null}
+            {entry.authRequired ? (
+              <span
+                className={styles.chip}
+                data-tone={entry.authConfigured ? 'neutral' : 'warning'}
+              >
+                {authText}
+              </span>
+            ) : null}
             {entry.tags.map((tag) => (
-              <span key={`${entryKey}-tag-${tag}`} className={styles.tag}>
+              <span key={`${entryKey}-tag-${tag}`} className={styles.chip}>
                 {tag}
               </span>
             ))}
           </div>
         ) : null}
+
+        <p className={styles.cardDetails}>
+          <span className={styles.cardId}>{entry.id}</span>
+          {details.map((item) => (
+            <span key={item}>{item}</span>
+          ))}
+        </p>
 
         <div className={styles.cardFooter}>
           <div className={styles.cardActions}>
@@ -1088,6 +1153,15 @@ export function PluginStorePage() {
           aria-label={t('plugin_store.search_label')}
           rightElement={<IconSearch size={16} />}
         />
+        <Select
+          className={styles.sort}
+          value={sortMode}
+          options={sortOptions}
+          onChange={(value) => setSortMode(value as PluginStoreSortMode)}
+          ariaLabel={t('plugin_store.sort_label')}
+          fullWidth={false}
+          size="sm"
+        />
         <Button
           variant="secondary"
           size="sm"
@@ -1106,9 +1180,7 @@ export function PluginStorePage() {
           <button
             key={item.key}
             type="button"
-            className={`${styles.filterChip} ${
-              statusFilter === item.key ? styles.filterChipActive : ''
-            }`}
+            className={styles.filterChip}
             onClick={() => setStatusFilter(item.key)}
             aria-pressed={statusFilter === item.key}
           >
